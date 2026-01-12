@@ -1,6 +1,5 @@
-import time
-print('debug start')
-for i in range(3):
-    print('tick', i)
-    time.sleep(0.5)
-print('debug end')
+"""
+ARCHIVED: play_debug.py
+
+Temporary debug harness — archived.
+"""

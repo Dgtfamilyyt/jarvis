@@ -9,7 +9,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 
 class Listener:
-    def __init__(self, model_size="base"):
+    def __init__(self, model_size="medium"):
         """
         Initialize the listener.
         model_size: 'tiny', 'base', 'small', 'medium', 'large'.
@@ -94,7 +94,7 @@ def listen_input():
     global _singleton_listener
     if _singleton_listener is None:
         try:
-            _singleton_listener = Listener(model_size="base")
+            _singleton_listener = Listener(model_size="medium")
         except Exception as e:
             print(f"Failed to initialize Whisper listener: {e}")
             # Fall back to typed input

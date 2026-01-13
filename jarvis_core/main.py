@@ -126,5 +126,53 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Jarvis in voice, text, or both modes")
     parser.add_argument("--mode", choices=["voice", "text", "both"], default="voice",
                         help="Input mode: 'voice' uses microphone, 'text' reads typed input, 'both' runs both concurrently.")
+    parser.add_argument("--remember", type=str, help="Save text to long-term memory and exit")
+    parser.add_argument("--forget", type=str, help="Forget memory by id or substring and exit")
+    parser.add_argument("--list-memories", action="store_true", help="Print recent memories and exit")
+    parser.add_argument("--consolidate", action="store_true", help="Consolidate older memories and exit")
+    parser.add_argument("--keep", type=int, default=200, help="When consolidating, keep this many latest memories")
     args = parser.parse_args()
+
+    # CLI memory operations: if any memory flag is present, perform the action and exit
+    if args.remember or args.forget or args.list_memories or args.consolidate:
+        # Initialize Brain (which will init MemoryManager if available)
+        brain = Brain(model="llama3.2")
+
+        if args.remember:
+            try:
+                mid = brain.remember(args.remember)
+                print(f"Remembered id: {mid}")
+            except Exception as e:
+                print(f"Remember failed: {e}")
+            exit(0)
+
+        if args.forget:
+            try:
+                ok = brain.forget_memory(args.forget)
+                print("Forgotten." if ok else "No matching memory found.")
+            except Exception as e:
+                print(f"Forget failed: {e}")
+            exit(0)
+
+        if args.list_memories:
+            try:
+                items = brain.list_memories(limit=200)
+                if not items:
+                    print("No memories stored.")
+                else:
+                    for it in items:
+                        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(it["meta"].get("ts", 0)))
+                        print(f"[{it['id'][:8]}] {ts} {it['text']}")
+            except Exception as e:
+                print(f"List memories failed: {e}")
+            exit(0)
+
+        if args.consolidate:
+            try:
+                brain.consolidate_memories(keep_latest=args.keep)
+                print(f"Consolidated memories, kept {args.keep} latest.")
+            except Exception as e:
+                print(f"Consolidate failed: {e}")
+            exit(0)
+
     main(mode=args.mode)

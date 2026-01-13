@@ -38,7 +38,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command>
-      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command "Start-Process -FilePath 'C:\Users\Davin\AppData\Local\Microsoft\WindowsApps\python.exe' -ArgumentList '-m jarvis_core.main' -WorkingDirectory 'C:\Users\Davin\VS project\jarvis' -WindowStyle Normal"</Arguments>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command "Start-Process -FilePath 'C:\Users\Davin\AppData\Local\Microsoft\WindowsApps\python.exe' -ArgumentList '-m jarvis_core.main --mode both' -WorkingDirectory 'C:\Users\Davin\VS project\jarvis' -WindowStyle Normal"</Arguments>
       <WorkingDirectory>C:\Users\Davin\VS project\jarvis</WorkingDirectory>
     </Exec>
   </Actions>

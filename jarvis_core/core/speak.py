@@ -9,30 +9,51 @@ import subprocess
 
 
 class Speaker:
-    def __init__(self, backend: str = None, voice: str = None):
-        """TTS speaker. backend: 'auto'|'edge'|'pyttsx3'.
+    def __init__(self, backend: str = None, voice: str = None, offline: bool = False):
+        """TTS speaker. backend: 'auto'|'edge'|'pyttsx3'|'eleven'.
         When 'auto', prefer edge-tts if available, else pyttsx3.
+        If offline=True, only use pyttsx3 (no internet-dependent backends).
         """
         
         self.backend = backend or config.TTS_BACKEND
         self.voice = voice or config.TTS_VOICE
+        self.offline = offline
         self._engine = None
+
+        # If offline mode, skip all online services and use pyttsx3 only
+        if self.offline:
+            try:
+                import pyttsx3
+                self._engine = pyttsx3.init()
+                voices = self._engine.getProperty("voices")
+                if voices:
+                    try:
+                        self._engine.setProperty("voice", voices[0].id)
+                    except Exception:
+                        pass
+                self._engine.setProperty("rate", 175)
+                self.backend = "pyttsx3"
+                print("Speaker: offline mode - using pyttsx3 backend only.", flush=True)
+            except Exception as e:
+                self._engine = None
+                print(f"Speaker offline init failed: {e}", flush=True)
+            return
 
         # Prefer ElevenLabs if configured (force it)
         self._eleven = False
         if config.ELEVENLABS_API_KEY and config.ELEVENLABS_VOICE and self.backend in ("auto", None, "eleven"):
             self._eleven = True
             self.backend = "eleven"
-            print("Speaker: configured to use ElevenLabs backend.")
+            print("Speaker: configured to use ElevenLabs backend.", flush=True)
             return
 
-        # Try to prefer edge-tts when requested or when auto
+        # Try to prefer edge-tts when requested or when auto (skip in offline mode)
         if self.backend in ("auto", "edge"):
             try:
                 import edge_tts
                 self._edge = edge_tts
                 self.backend = "edge"
-                print("Speaker: using edge-tts backend.")
+                print("Speaker: using edge-tts backend.", flush=True)
                 return
             except Exception:
                 self._edge = None
@@ -49,19 +70,21 @@ class Speaker:
                     pass
             self._engine.setProperty("rate", 175)
             self.backend = "pyttsx3"
-            print("Speaker: using pyttsx3 backend.")
+            print("Speaker: using pyttsx3 backend.", flush=True)
         except Exception as e:
             self._engine = None
-            print(f"Speaker initialization failed: {e}")
+            print(f"Speaker initialization failed: {e}", flush=True)
 
     def _play_mp3_nonblocking(self, path: str):
         try:
+            print(f"[SPEAK] Playing MP3: {path}", flush=True)
             if os.name == "nt":
                 os.startfile(path)
             else:
                 # POSIX: try xdg-open
                 import subprocess
                 subprocess.Popen(["xdg-open", path])
+            print(f"[SPEAK] MP3 playback initiated", flush=True)
 
             # Schedule deletion
             def _cleanup():
@@ -73,13 +96,15 @@ class Speaker:
 
             threading.Thread(target=_cleanup, daemon=True).start()
         except Exception as e:
-            print(f"Failed to play mp3: {e}")
+            print(f"[SPEAK] Failed to play mp3: {e}", flush=True)
 
     def speak_output(self, text: str):
-        print(f"Jarvis: {text}")
+        print(f"Jarvis: {text}", flush=True)
+        print(f"[SPEAK] Using backend: {self.backend}", flush=True)
         # ElevenLabs TTS via REST (preferred if configured)
         if self.backend in ("eleven", "auto") and config.ELEVENLABS_API_KEY and config.ELEVENLABS_VOICE:
             try:
+                print(f"[SPEAK] Calling ElevenLabs API...", flush=True)
                 url = f"https://api.elevenlabs.io/v1/text-to-speech/{config.ELEVENLABS_VOICE}"
                 # Request WAV so we can play in-memory without ffmpeg
                 headers = {
@@ -89,6 +114,7 @@ class Speaker:
                 }
                 payload = {"text": text, "voice_settings": {"stability": 0.3, "similarity_boost": 0.75}}
                 resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=30)
+                print(f"[SPEAK] ElevenLabs response status: {resp.status_code}", flush=True)
                 if resp.status_code == 200:
                     content = resp.content
                     # Detect WAV by RIFF header or content-type
@@ -191,12 +217,13 @@ class Speaker:
                     except Exception as e:
                         print('Fallback save/play failed:', e)
                 else:
-                    print(f"ElevenLabs TTS failed: {resp.status_code} {resp.text}")
+                    print(f"[SPEAK] ElevenLabs TTS failed: {resp.status_code} {resp.text}", flush=True)
             except Exception as e:
-                print(f"ElevenLabs error: {e}")
+                print(f"[SPEAK] ElevenLabs error: {e}", flush=True)
         # Edge-TTS path
         if getattr(self, "_edge", None):
             try:
+                print(f"[SPEAK] Using edge-tts backend", flush=True)
                 import asyncio
                 tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
                 tmp.close()
@@ -207,19 +234,23 @@ class Speaker:
                     await comm.save(outfile)
 
                 asyncio.run(_save())
+                print(f"[SPEAK] edge-tts generated MP3: {outfile}", flush=True)
                 self._play_mp3_nonblocking(outfile)
                 return
             except Exception as e:
-                print(f"edge-tts error, falling back: {e}")
+                print(f"[SPEAK] edge-tts error, falling back: {e}", flush=True)
 
         # pyttsx3 fallback
         if self._engine:
             try:
+                print(f"[SPEAK] Using pyttsx3 backend", flush=True)
                 self._engine.say(text)
+                print(f"[SPEAK] pyttsx3 speaking...", flush=True)
                 self._engine.runAndWait()
+                print(f"[SPEAK] pyttsx3 speech completed", flush=True)
                 return
             except Exception as e:
-                print(f"pyttsx3 error: {e}")
+                print(f"[SPEAK] pyttsx3 error: {e}", flush=True)
 
         # Final fallback: print only
         print(text)

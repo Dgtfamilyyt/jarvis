@@ -2,6 +2,7 @@ import os
 import tempfile
 import threading
 import time
+import queue as _queue
 from .. import config
 import requests
 import io
@@ -19,6 +20,8 @@ class Speaker:
         self.voice = voice or config.TTS_VOICE
         self.offline = offline
         self._engine = None
+        self._play_q = None
+        self._play_thread = None
 
         # If offline mode, skip all online services and use pyttsx3 only
         if self.offline:
@@ -34,6 +37,28 @@ class Speaker:
                 self._engine.setProperty("rate", 175)
                 self.backend = "pyttsx3"
                 print("Speaker: offline mode - using pyttsx3 backend only.", flush=True)
+                # Start worker queue so pyttsx3 runs on a dedicated thread
+                try:
+                    self._play_q = _queue.Queue()
+                    def _pytt_worker_offline():
+                        while True:
+                            item = self._play_q.get()
+                            if item is None:
+                                break
+                            text, ev = item
+                            try:
+                                self._engine.say(text)
+                                self._engine.runAndWait()
+                                if ev:
+                                    ev.set()
+                            except Exception as e:
+                                print(f"[SPEAK] pyttsx3 offline worker error: {e}", flush=True)
+                                if ev:
+                                    ev.set()
+                    self._play_thread = threading.Thread(target=_pytt_worker_offline, daemon=True)
+                    self._play_thread.start()
+                except Exception as e:
+                    print(f"[SPEAK] Failed to start pyttsx3 offline worker: {e}", flush=True)
             except Exception as e:
                 self._engine = None
                 print(f"Speaker offline init failed: {e}", flush=True)
@@ -71,6 +96,31 @@ class Speaker:
             self._engine.setProperty("rate", 175)
             self.backend = "pyttsx3"
             print("Speaker: using pyttsx3 backend.", flush=True)
+            # Create a playback queue and worker so pyttsx3 always runs on its own thread
+            try:
+                self._play_q = _queue.Queue()
+                def _pytt_worker():
+                    while True:
+                        try:
+                            item = self._play_q.get()
+                            if item is None:
+                                break
+                            text, ev = item
+                            try:
+                                self._engine.say(text)
+                                self._engine.runAndWait()
+                                if ev:
+                                    ev.set()
+                            except Exception as e:
+                                print(f"[SPEAK] pyttsx3 worker error: {e}", flush=True)
+                                if ev:
+                                    ev.set()
+                        except Exception as e:
+                            print(f"[SPEAK] pyttsx3 worker top-level error: {e}", flush=True)
+                self._play_thread = threading.Thread(target=_pytt_worker, daemon=True)
+                self._play_thread.start()
+            except Exception as e:
+                print(f"[SPEAK] Failed to start pyttsx3 worker thread: {e}", flush=True)
         except Exception as e:
             self._engine = None
             print(f"Speaker initialization failed: {e}", flush=True)
@@ -97,6 +147,60 @@ class Speaker:
             threading.Thread(target=_cleanup, daemon=True).start()
         except Exception as e:
             print(f"[SPEAK] Failed to play mp3: {e}", flush=True)
+
+    def _enable_offline_pyttsx3(self):
+        """Attempt to initialize pyttsx3 and switch the speaker to offline mode."""
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            voices = engine.getProperty("voices")
+            if voices:
+                try:
+                    engine.setProperty("voice", voices[0].id)
+                except Exception:
+                    pass
+            engine.setProperty("rate", 175)
+            self._engine = engine
+            self.backend = "pyttsx3"
+            self.offline = True
+            # clear any online backends to avoid retries
+            self._edge = None
+            self._eleven = False
+            # If worker queue/thread not created yet, create them to ensure proper thread usage
+            try:
+                if not getattr(self, '_play_q', None):
+                    self._play_q = _queue.Queue()
+
+                    def _pytt_worker():
+                        while True:
+                            try:
+                                item = self._play_q.get()
+                                if item is None:
+                                    break
+                                text, ev = item
+                                try:
+                                    self._engine.say(text)
+                                    self._engine.runAndWait()
+                                    if ev:
+                                        ev.set()
+                                except Exception as e:
+                                    print(f"[SPEAK] pyttsx3 worker error: {e}", flush=True)
+                                    if ev:
+                                        ev.set()
+                            except Exception as e:
+                                print(f"[SPEAK] pyttsx3 worker top-level error: {e}", flush=True)
+
+                    self._play_thread = threading.Thread(target=_pytt_worker, daemon=True)
+                    self._play_thread.start()
+            except Exception as e:
+                print(f"[SPEAK] Failed to start pyttsx3 worker thread during fallback: {e}", flush=True)
+
+            print("[SPEAK] Switched to offline pyttsx3 backend after ElevenLabs failure.", flush=True)
+            return True
+        except Exception as e:
+            print(f"[SPEAK] Failed to initialize pyttsx3 during fallback: {e}", flush=True)
+            self._engine = None
+            return False
 
     def speak_output(self, text: str):
         print(f"Jarvis: {text}", flush=True)
@@ -218,8 +322,61 @@ class Speaker:
                         print('Fallback save/play failed:', e)
                 else:
                     print(f"[SPEAK] ElevenLabs TTS failed: {resp.status_code} {resp.text}", flush=True)
+                    # If ElevenLabs fails, attempt to switch to offline pyttsx3 immediately
+                    if self._enable_offline_pyttsx3():
+                        try:
+                            print(f"[SPEAK] Speaking using pyttsx3 after ElevenLabs failure", flush=True)
+                            if getattr(self, '_play_q', None):
+                                ev = threading.Event()
+                                try:
+                                    self._play_q.put((text, ev))
+                                    ev.wait(timeout=8)
+                                except Exception as e:
+                                    print(f"[SPEAK] Failed to queue pyttsx3 fallback: {e}", flush=True)
+                                    # fallback to direct call
+                                    try:
+                                        self._engine.say(text)
+                                        self._engine.runAndWait()
+                                    except Exception as e2:
+                                        print(f"[SPEAK] Direct pyttsx3 fallback also failed: {e2}", flush=True)
+                            else:
+                                try:
+                                    self._engine.say(text)
+                                    self._engine.runAndWait()
+                                except Exception as e:
+                                    print(f"[SPEAK] pyttsx3 fallback failed: {e}", flush=True)
+                            print(f"[SPEAK] pyttsx3 speech completed (fallback)", flush=True)
+                            return
+                        except Exception as e:
+                            print(f"[SPEAK] pyttsx3 fallback failed: {e}", flush=True)
             except Exception as e:
                 print(f"[SPEAK] ElevenLabs error: {e}", flush=True)
+                # On exception (network, auth, etc.) switch to offline pyttsx3
+                if self._enable_offline_pyttsx3():
+                    try:
+                        print(f"[SPEAK] Speaking using pyttsx3 after ElevenLabs exception", flush=True)
+                        if getattr(self, '_play_q', None):
+                            ev = threading.Event()
+                            try:
+                                self._play_q.put((text, ev))
+                                ev.wait(timeout=8)
+                            except Exception as e:
+                                print(f"[SPEAK] Failed to queue pyttsx3 fallback after exception: {e}", flush=True)
+                                try:
+                                    self._engine.say(text)
+                                    self._engine.runAndWait()
+                                except Exception as e2:
+                                    print(f"[SPEAK] Direct pyttsx3 fallback also failed: {e2}", flush=True)
+                        else:
+                            try:
+                                self._engine.say(text)
+                                self._engine.runAndWait()
+                            except Exception as e:
+                                print(f"[SPEAK] pyttsx3 fallback failed after exception: {e}", flush=True)
+                        print(f"[SPEAK] pyttsx3 speech completed (fallback)", flush=True)
+                        return
+                    except Exception as e2:
+                        print(f"[SPEAK] pyttsx3 fallback failed after ElevenLabs exception: {e2}", flush=True)
         # Edge-TTS path
         if getattr(self, "_edge", None):
             try:
@@ -244,16 +401,118 @@ class Speaker:
         if self._engine:
             try:
                 print(f"[SPEAK] Using pyttsx3 backend", flush=True)
-                self._engine.say(text)
-                print(f"[SPEAK] pyttsx3 speaking...", flush=True)
-                self._engine.runAndWait()
-                print(f"[SPEAK] pyttsx3 speech completed", flush=True)
-                return
+                # Always queue pyttsx3 work to the dedicated worker thread to avoid thread-safety issues
+                if getattr(self, '_play_q', None):
+                    ev = threading.Event()
+                    try:
+                        self._play_q.put((text, ev))
+                        print(f"[SPEAK] pyttsx3 queued (waiting for completion)", flush=True)
+                        ev.wait(timeout=8)
+                        print(f"[SPEAK] pyttsx3 speech completed (queued)", flush=True)
+                        return
+                    except Exception as e:
+                        print(f"[SPEAK] Failed to queue pyttsx3 speak: {e}", flush=True)
+                        # fallback to direct invocation
+                        try:
+                            self._engine.say(text)
+                            print(f"[SPEAK] pyttsx3 speaking (direct fallback)...", flush=True)
+                            self._engine.runAndWait()
+                            print(f"[SPEAK] pyttsx3 speech completed (direct)", flush=True)
+                            return
+                        except Exception as e2:
+                            print(f"[SPEAK] pyttsx3 direct fallback failed: {e2}", flush=True)
+                else:
+                    # No queue available; do direct call
+                    self._engine.say(text)
+                    print(f"[SPEAK] pyttsx3 speaking...", flush=True)
+                    self._engine.runAndWait()
+                    print(f"[SPEAK] pyttsx3 speech completed", flush=True)
+                    return
             except Exception as e:
                 print(f"[SPEAK] pyttsx3 error: {e}", flush=True)
 
         # Final fallback: print only
-        print(text)
+        print(text, flush=True)
+        # As a last effort, attempt to initialize pyttsx3 and speak locally
+        try:
+            if not self._engine:
+                print("[SPEAK] No audio backend succeeded; attempting pyttsx3 as last-resort.", flush=True)
+                if self._enable_offline_pyttsx3():
+                    try:
+                            # If config forces file playback, use that method
+                            if getattr(__import__('..', fromlist=['config']), 'config').FORCE_PYTTX3_FILE:
+                                played = self._pytt_save_and_play(text)
+                                if played:
+                                    print("[SPEAK] pyttsx3 file-playback completed (last-resort)", flush=True)
+                                    return
+                            self._engine.say(text)
+                            self._engine.runAndWait()
+                            print("[SPEAK] pyttsx3 speech completed (last-resort)", flush=True)
+                            return
+                    except Exception as e:
+                        print(f"[SPEAK] pyttsx3 last-resort failed: {e}", flush=True)
+            else:
+                # engine exists but previous paths didn't run it; try speaking
+                try:
+                    print("[SPEAK] Using existing pyttsx3 engine as last-resort.", flush=True)
+                    self._engine.say(text)
+                    self._engine.runAndWait()
+                    print("[SPEAK] pyttsx3 speech completed (existing engine)", flush=True)
+                    return
+                except Exception as e:
+                    print(f"[SPEAK] pyttsx3 existing-engine failed: {e}", flush=True)
+        except Exception as e:
+            print(f"[SPEAK] Final fallback pyttsx3 attempt failed: {e}", flush=True)
+
+    def _pytt_save_and_play(self, text: str):
+        """Save TTS output to a WAV file using a fresh pyttsx3 engine and play it with OS player/winsound."""
+        try:
+            import pyttsx3
+            import tempfile
+            import os
+            engine = pyttsx3.init()
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+            tf_name = tf.name
+            tf.close()
+            try:
+                engine.save_to_file(text, tf_name)
+                engine.runAndWait()
+            except Exception as e:
+                # cleanup and re-raise
+                try:
+                    os.remove(tf_name)
+                except Exception:
+                    pass
+                raise
+
+            # Play the file: prefer winsound on Windows for memory play
+            try:
+                if os.name == 'nt':
+                    import winsound
+                    winsound.PlaySound(tf_name, winsound.SND_FILENAME)
+                else:
+                    # Use default application to open the file
+                    try:
+                        os.startfile(tf_name)
+                    except Exception:
+                        # POSIX: fall back to xdg-open
+                        import subprocess
+                        subprocess.Popen(["xdg-open", tf_name])
+            except Exception as e:
+                print(f"[SPEAK] Failed to play saved WAV: {e}", flush=True)
+            finally:
+                # Schedule cleanup
+                def _cleanup():
+                    time.sleep(6)
+                    try:
+                        os.remove(tf_name)
+                    except Exception:
+                        pass
+                threading.Thread(target=_cleanup, daemon=True).start()
+            return True
+        except Exception as e:
+            print(f"[SPEAK] _pytt_save_and_play failed: {e}", flush=True)
+            return False
 
 
 # Module-level singleton for convenience

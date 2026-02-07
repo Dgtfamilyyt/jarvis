@@ -30,7 +30,6 @@ class ReminderSkills:
         """List all pending reminders."""
         if not self.reminders:
             return "No reminders set."
-        
         pending = [r for r in self.reminders if not r.get("done")]
         if not pending:
             return "No pending reminders."

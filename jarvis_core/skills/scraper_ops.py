@@ -51,38 +51,34 @@ class ScraperSkills:
             return f"Error: {e}"
 
     def search_information(self, query: str) -> str:
-        """Search for information using DuckDuckGo (no API key needed)."""
+        """Search for information using configured search backend (DuckDuckGo instant answer or Bing).
+        Returns a short textual summary of the top results.
+        """
         if not query:
             return "No search query provided."
-        
+
         try:
-            import re
-            # Use DuckDuckGo HTML search (basic approach)
-            url = f"https://html.duckduckgo.com/?q={query}"
-            resp = self.session.get(url, timeout=10)
-            resp.raise_for_status()
-            
-            # Parse results (simplified)
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(resp.content, "html.parser")
-                results = []
-                
-                for result in soup.find_all("div", class_="result", limit=5):
-                    title_elem = result.find("a", class_="result__url")
-                    snippet_elem = result.find("a", class_="result__snippet")
-                    
-                    if title_elem and snippet_elem:
-                        title = title_elem.get_text(strip=True)
-                        snippet = snippet_elem.get_text(strip=True)
-                        results.append(f"{title}: {snippet}")
-                
-                if results:
-                    return "\n".join(results)
+            # Lazy import to avoid circular import at module load time
+            from . import web_ops as web_ops_mod
+            results = web_ops_mod.web_search(query, max_results=5)
+            if not results:
+                return "No results found."
+            out_lines = []
+            for i, r in enumerate(results, start=1):
+                title = r.get('title') or ''
+                snippet = r.get('snippet') or ''
+                url = r.get('url') or ''
+                if title and snippet:
+                    out_lines.append(f"{i}. {title}: {snippet}")
+                elif title:
+                    out_lines.append(f"{i}. {title} - {url}")
+                elif snippet:
+                    out_lines.append(f"{i}. {snippet} - {url}")
                 else:
-                    return "No results found."
-            except ImportError:
-                return "Install beautifulsoup4 for better search parsing."
+                    out_lines.append(f"{i}. {url}")
+                if len(out_lines) >= 5:
+                    break
+            return "\n".join(out_lines)
         except Exception as e:
             return f"Search failed: {e}"
 

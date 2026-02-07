@@ -27,6 +27,9 @@ def main(mode: str = "voice", offline: bool = False, wakeword_enabled: Optional[
     mouth = Speaker(offline=offline)
     brain = Brain(model="llama3.2")  # Ensure Ollama is running
     skills = SystemSkills()
+    # Add scraper skill for search/scrape operations
+    from jarvis_core.skills.scraper_ops import ScraperSkills
+    scraper = ScraperSkills()
 
     mouth.speak_output("Systems online. Ready for commands.")
 
@@ -117,13 +120,51 @@ def main(mode: str = "voice", offline: bool = False, wakeword_enabled: Optional[
                 mouth.speak_output(response)
                 continue
 
-            # WEBSITES
-            if "go to" in user_input_lower or "search for" in user_input_lower:
+            # WEBSITES (explicit navigation commands)
+            # Note: do NOT capture 'search for' here so that search queries reach the search handler below
+            if "go to" in user_input_lower or "open website" in user_input_lower or "open url" in user_input_lower:
                 print(f"[DISPATCHER] Website command detected", flush=True)
-                url = user_input_lower.replace("go to", "").replace("search for", "").strip()
+                url = user_input_lower.replace("go to", "").replace("open website", "").replace("open url", "").strip()
                 response = skills.open_website(url)
                 print(f"[DISPATCHER] Website response: {response}", flush=True)
                 mouth.speak_output(response)
+                continue
+
+            # SEARCH KEYWORD: phrases like "search ..." or "search for ..."
+            if user_input_lower.startswith("search ") or " search for " in user_input_lower or user_input_lower.startswith("search for "):
+                # Extract search query
+                q = user_input_lower
+                if "search for " in q:
+                    q = q.split("search for ",1)[1].strip()
+                elif q.startswith("search "):
+                    q = q.split("search ",1)[1].strip()
+                else:
+                    q = q.strip()
+
+                if not q:
+                    mouth.speak_output("What would you like me to search for?")
+                    if ear is not None:
+                        follow = ear.listen_input()
+                        q = follow or ""
+
+                if not q:
+                    mouth.speak_output("No search query provided.")
+                    continue
+
+                print(f"[DISPATCHER] Search query: {q}", flush=True)
+                # Ensure scraping/searching is enabled in config
+                if not config.ENABLE_SCRAPING:
+                    msg = "Web search is currently disabled. Set ENABLE_SCRAPING=true in your .env to enable it."
+                    print(f"[DISPATCHER] {msg}", flush=True)
+                    mouth.speak_output(msg)
+                    continue
+                try:
+                    response = scraper.search_information(q)
+                    print(f"[DISPATCHER] Search response: {response}", flush=True)
+                    mouth.speak_output(response)
+                except Exception as e:
+                    print(f"[DISPATCHER] Search error: {e}", flush=True)
+                    mouth.speak_output("Search failed.")
                 continue
 
             # Brain fallback

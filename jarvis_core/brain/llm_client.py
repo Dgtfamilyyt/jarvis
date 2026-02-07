@@ -32,7 +32,7 @@ class MemoryManager:
     """Retrieval-augmented memory manager.
 
     Features:
-    - Stores memories (text + metadata) in a JSONL file for append/streaming.
+    - Stores memories (text + metadata) in a JSONL file for append /streaming.
     - Keeps in-memory embeddings and supports retrieval via cosine similarity.
     - Tries to use `sentence_transformers` for embeddings, falls back to OpenAI embeddings
       if `OPENAI_API_KEY` is set, else uses a deterministic hash-based vector.

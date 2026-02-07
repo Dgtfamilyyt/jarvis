@@ -14,3 +14,21 @@ ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE", "")
 # If true, pyttsx3 will save speech to a WAV file and play it with the OS player
 # Useful when direct pyttsx3 audio is not audible on some systems
 FORCE_PYTTX3_FILE = os.getenv("FORCE_PYTTX3_FILE", "false").lower() in ("1","true","yes")
+
+# ---- Web scraping configuration ----
+# Set to true to enable programmatic HTTP scraping via skills/web_ops.py
+ENABLE_SCRAPING = os.getenv("ENABLE_SCRAPING", "false").lower() in ("1","true","yes")
+# Respect site robots.txt when scraping (recommended)
+SCRAPING_RESPECT_ROBOTS = os.getenv("SCRAPING_RESPECT_ROBOTS", "true").lower() in ("1","true","yes")
+# Default user agent used for scraping
+SCRAPING_USER_AGENT = os.getenv("SCRAPING_USER_AGENT", "JarvisBot/1.0 (+https://example.local)")
+# Request timeout (seconds)
+SCRAPING_TIMEOUT = float(os.getenv("SCRAPING_TIMEOUT", "10"))
+# Max bytes to download from a page (prevents very large downloads)
+SCRAPING_MAX_BYTES = int(os.getenv("SCRAPING_MAX_BYTES", "200000"))  # ~200 KB
+
+# ---- Web search configuration ----
+# Provider: 'duckduckgo' (default, no API key) or 'bing' (requires BING_SUBSCRIPTION_KEY)
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "duckduckgo").lower()
+BING_SUBSCRIPTION_KEY = os.getenv("BING_SUBSCRIPTION_KEY", "")
+BING_ENDPOINT = os.getenv("BING_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")

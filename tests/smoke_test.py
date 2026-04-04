@@ -1,12 +1,17 @@
 import sys
+import os
 from pathlib import Path
 
+# Change to project root directory to ensure consistent paths
+project_root = Path(__file__).resolve().parent.parent
+os.chdir(project_root)
+
 # Ensure project root is on sys.path so package imports work when running this script directly
-root = Path(__file__).resolve().parents[1]
-if str(root) not in sys.path:
-    sys.path.insert(0, str(root))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 def run_smoke_test():
+    print(f"Running smoke test from: {os.getcwd()}")
     print("--- STARTING JARVIS SMOKE TEST ---")
     
     # 1. Test Dependencies

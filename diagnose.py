@@ -1,4 +1,4 @@
-python -m jarvis_core.main --mode voice #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Interactive diagnostic tool to debug Jarvis TTS output.
 Run: python diagnose.py

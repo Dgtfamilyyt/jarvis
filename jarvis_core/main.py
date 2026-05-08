@@ -7,6 +7,7 @@ from .core.listen import Listener
 from .core.speak import Speaker
 from .brain.llm_client import Brain
 from .skills.system_ops import SystemSkills
+from .skills import MediaSkills
 from . import config
 
 
@@ -30,6 +31,7 @@ def main(mode: str = "voice", offline: bool = False, wakeword_enabled: Optional[
     # Add scraper skill for search/scrape operations
     from jarvis_core.skills.scraper_ops import ScraperSkills
     scraper = ScraperSkills()
+    media = MediaSkills()
 
     mouth.speak_output("Systems online. Ready for commands.")
 
@@ -120,6 +122,15 @@ def main(mode: str = "voice", offline: bool = False, wakeword_enabled: Optional[
                 mouth.speak_output(response)
                 continue
 
+            # RUN OLLAMA
+            if "run ollama" in user_input_lower or "start ollama" in user_input_lower:
+                print(f"[DISPATCHER] Ollama command detected", flush=True)
+                command = "ollama run llama3.2"
+                response = skills.run_terminal_command(command)
+                print(f"[DISPATCHER] Ollama response: {response}", flush=True)
+                mouth.speak_output(response)
+                continue
+
             # WEBSITES (explicit navigation commands)
             # Note: do NOT capture 'search for' here so that search queries reach the search handler below
             if "go to" in user_input_lower or "open website" in user_input_lower or "open url" in user_input_lower:
@@ -165,6 +176,14 @@ def main(mode: str = "voice", offline: bool = False, wakeword_enabled: Optional[
                 except Exception as e:
                     print(f"[DISPATCHER] Search error: {e}", flush=True)
                     mouth.speak_output("Search failed.")
+                continue
+
+            # Sun image generation command
+            if "sun image" in user_input_lower or "generate sun" in user_input_lower or "draw a sun" in user_input_lower:
+                print(f"[DISPATCHER] Sun image command detected", flush=True)
+                response = media.generate_sun_image()
+                print(f"[DISPATCHER] Sun image response: {response}", flush=True)
+                mouth.speak_output(response)
                 continue
 
             # Brain fallback

@@ -2,6 +2,7 @@ import os
 import webbrowser
 import platform
 import datetime
+import subprocess
 from typing import Dict
 
 
@@ -57,6 +58,38 @@ class SystemSkills:
         now = datetime.datetime.now().strftime("%I:%M %p")
         return f"The current time is {now}"
 
+    def run_terminal_command(self, command: str):
+        """
+        Runs a terminal command and returns the result.
+        Use with caution - only run trusted commands.
+        """
+        if not command:
+            return "No command specified"
+
+        try:
+            print(f"Running command: {command}")
+            # Run the command and capture output
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            
+            output = result.stdout.strip()
+            error = result.stderr.strip()
+            
+            if result.returncode == 0:
+                if output:
+                    return f"Command executed successfully: {output}"
+                else:
+                    return "Command executed successfully (no output)"
+            else:
+                if error:
+                    return f"Command failed: {error}"
+                else:
+                    return f"Command failed with return code {result.returncode}"
+                    
+        except subprocess.TimeoutExpired:
+            return "Command timed out after 30 seconds"
+        except Exception as e:
+            return f"Failed to run command: {e}"
+
 
 # Module-level instance for simple routing
 _system_skills = SystemSkills()
@@ -84,5 +117,10 @@ def execute_function(payload: Dict):
     # Get time
     if tool.endswith("get_time") or tool.endswith("time"):
         return _system_skills.get_time()
+
+    # Run terminal command
+    if tool.endswith("run_terminal_command") or tool.endswith("run_command"):
+        command = payload.get("command") or payload.get("cmd") or ""
+        return _system_skills.run_terminal_command(command)
 
     return f"Unknown tool: {tool}"

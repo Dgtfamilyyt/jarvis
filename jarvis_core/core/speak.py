@@ -6,6 +6,7 @@ import queue as _queue
 from .. import config
 import requests
 import io
+import json
 import subprocess
 
 
@@ -204,57 +205,240 @@ class Speaker:
 
     def speak_output(self, text: str):
         print(f"Jarvis: {text}", flush=True)
-        print(f"[SPEAK] Using backend: {self.backend}", flush=True)
-        # ElevenLabs TTS via REST (preferred if configured)
-        if self.backend in ("eleven", "auto") and config.ELEVENLABS_API_KEY and config.ELEVENLABS_VOICE:
+        
+        # Try TTS backends in priority order: ElevenLabs -> Edge-TTS -> OpenRouter -> gTTS -> pyttsx3
+        backends = [
+            ("eleven", self._speak_elevenlabs),
+            ("edge", self._speak_edge_tts),
+            ("openrouter", self._speak_openrouter),
+            ("gtts", self._speak_gtts),
+            ("pyttsx3", self._speak_pyttsx3)
+        ]
+        
+        for backend_name, speak_func in backends:
             try:
-                print(f"[SPEAK] Calling ElevenLabs API...", flush=True)
-                url = f"https://api.elevenlabs.io/v1/text-to-speech/{config.ELEVENLABS_VOICE}"
-                # Request WAV so we can play in-memory without ffmpeg
-                headers = {
-                    "xi-api-key": config.ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                    "Accept": "audio/wav",
-                }
-                payload = {"text": text, "voice_settings": {"stability": 0.3, "similarity_boost": 0.75}}
-                resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=30)
-                print(f"[SPEAK] ElevenLabs response status: {resp.status_code}", flush=True)
-                if resp.status_code == 200:
-                    content = resp.content
-                    # Detect WAV by RIFF header or content-type
-                    is_wav = (content[:4] == b'RIFF') or ('wav' in (resp.headers.get('content-type') or '').lower())
-                    wav_bytes = None
+                print(f"[SPEAK] Attempting backend: {backend_name}", flush=True)
+                if speak_func(text):
+                    print(f"[SPEAK] Successfully spoke using {backend_name}", flush=True)
+                    return
+                else:
+                    print(f"[SPEAK] {backend_name} backend failed or unavailable", flush=True)
+            except Exception as e:
+                print(f"[SPEAK] {backend_name} backend error: {e}", flush=True)
+        
+        # All backends failed
+        print(f"[SPEAK] All TTS backends failed. Outputting text only: {text}", flush=True)
 
-                    if not is_wav:
-                        # Try to convert MP3 (or other audio) to WAV using ffmpeg in-memory
+    def _speak_elevenlabs(self, text: str) -> bool:
+        """Attempt to speak using ElevenLabs TTS. Returns True if successful."""
+        if not (config.ELEVENLABS_API_KEY and config.ELEVENLABS_VOICE):
+            return False
+        
+        try:
+            print(f"[SPEAK] Calling ElevenLabs API...", flush=True)
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{config.ELEVENLABS_VOICE}"
+            headers = {
+                "xi-api-key": config.ELEVENLABS_API_KEY,
+                "Content-Type": "application/json",
+                "Accept": "audio/wav",
+            }
+            payload = {"text": text, "voice_settings": {"stability": 0.3, "similarity_boost": 0.75}}
+            resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=30)
+            print(f"[SPEAK] ElevenLabs response status: {resp.status_code}", flush=True)
+            if resp.status_code == 200:
+                content = resp.content
+                is_wav = (content[:4] == b'RIFF') or ('wav' in (resp.headers.get('content-type') or '').lower())
+                wav_bytes = None
+
+                if not is_wav:
+                    try:
+                        ff = ['ffmpeg', '-i', 'pipe:0', '-f', 'wav', 'pipe:1', '-hide_banner', '-loglevel', 'error']
+                        proc = subprocess.run(ff, input=content, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                        if proc.returncode == 0 and proc.stdout:
+                            wav_bytes = proc.stdout
+                            is_wav = True
+                        else:
+                            print('ffmpeg conversion failed:', proc.returncode, proc.stderr.decode('utf-8', errors='ignore'))
+                    except Exception as e:
+                        print('ffmpeg conversion exception:', e)
+
+                if is_wav and wav_bytes is None:
+                    wav_bytes = content
+
+                if wav_bytes:
+                    try:
+                        import wave as _wave
+                        with _wave.open(io.BytesIO(wav_bytes), 'rb') as _wr:
+                            _nch = _wr.getnchannels()
+                            _sampw = _wr.getsampwidth()
+                            _fr = _wr.getframerate()
+                            _nframes = _wr.getnframes()
+                            _comptype = _wr.getcomptype()
+                        print(f"[TTS DEBUG] WAV params: nch={_nch}, sampwidth={_sampw}, framerate={_fr}, nframes={_nframes}, comptype={_comptype}")
+                    except Exception as _e:
+                        print('[TTS DEBUG] Failed to read WAV params:', _e)
+
+                    # Try simpleaudio first
+                    try:
+                        import wave
+                        import simpleaudio as sa
+                        print('[TTS DEBUG] Trying simpleaudio playback')
+                        with wave.open(io.BytesIO(wav_bytes), 'rb') as wr:
+                            wave_obj = sa.WaveObject.from_wave_read(wr)
+                            play_obj = wave_obj.play()
+                            play_obj.wait_done()
+                            print('[TTS DEBUG] simpleaudio playback done')
+                            return True
+                    except Exception as _e:
+                        print('[TTS DEBUG] simpleaudio unavailable/failed:', _e)
+
+                    # Try pygame
+                    try:
+                        import pygame
+                        import tempfile
+                        print('[TTS DEBUG] Trying pygame playback')
+                        tf = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+                        tf.write(wav_bytes)
+                        tf.flush()
+                        tf.close()
                         try:
-                            # Preserve original sample rate/channels; don't force resampling
-                            ff = ['ffmpeg', '-i', 'pipe:0', '-f', 'wav', 'pipe:1', '-hide_banner', '-loglevel', 'error']
-                            proc = subprocess.run(ff, input=content, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-                            if proc.returncode == 0 and proc.stdout:
-                                wav_bytes = proc.stdout
-                                is_wav = True
-                            else:
-                                print('ffmpeg conversion failed:', proc.returncode, proc.stderr.decode('utf-8', errors='ignore'))
-                        except Exception as e:
-                            print('ffmpeg conversion exception:', e)
+                            with wave.open(tf.name, 'rb') as wr:
+                                fr = wr.getframerate()
+                                chs = wr.getnchannels()
+                            pygame.mixer.init(frequency=fr, channels=chs)
+                        except Exception:
+                            try:
+                                pygame.mixer.init()
+                            except Exception:
+                                pass
+                        print('[TTS DEBUG] pygame mixer init:', pygame.mixer.get_init())
+                        snd = pygame.mixer.Sound(tf.name)
+                        ch = snd.play()
+                        while ch.get_busy():
+                            pygame.time.wait(50)
+                        print('[TTS DEBUG] pygame playback done; temp file:', tf.name)
+                        return True
+                    except Exception as _e:
+                        print('[TTS DEBUG] pygame unavailable/failed:', _e)
 
-                    if is_wav and wav_bytes is None:
-                        wav_bytes = content
+                    # Try winsound (Windows)
+                    try:
+                        import winsound
+                        print('[TTS DEBUG] Trying winsound playback')
+                        if wav_bytes[:4] == b'RIFF':
+                            winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+                            print('[TTS DEBUG] winsound playback done')
+                            return True
+                    except Exception as _e:
+                        print('[TTS DEBUG] winsound unavailable/failed:', _e)
 
-                    if wav_bytes:
-                        # Diagnostic: report WAV params
-                        try:
-                            import wave as _wave
-                            with _wave.open(io.BytesIO(wav_bytes), 'rb') as _wr:
-                                _nch = _wr.getnchannels()
-                                _sampw = _wr.getsampwidth()
-                                _fr = _wr.getframerate()
-                                _nframes = _wr.getnframes()
-                                _comptype = _wr.getcomptype()
-                            print(f"[TTS DEBUG] WAV params: nch={_nch}, sampwidth={_sampw}, framerate={_fr}, nframes={_nframes}, comptype={_comptype}")
-                        except Exception as _e:
-                            print('[TTS DEBUG] Failed to read WAV params:', _e)
+                # Fallback: save file and play
+                try:
+                    tmp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+                    with open(tmp.name, 'wb') as f:
+                        f.write(content)
+                    self._play_mp3_nonblocking(tmp.name)
+                    return True
+                except Exception as e:
+                    print('Fallback save/play failed:', e)
+            else:
+                print(f"[SPEAK] ElevenLabs TTS failed: {resp.status_code} {resp.text}", flush=True)
+        except Exception as e:
+            print(f"[SPEAK] ElevenLabs error: {e}", flush=True)
+        return False
+
+    def _speak_edge_tts(self, text: str) -> bool:
+        """Attempt to speak using Edge TTS. Returns True if successful."""
+        if not hasattr(self, '_edge') or self._edge is None:
+            return False
+        
+        try:
+            print(f"[SPEAK] Using edge-tts backend", flush=True)
+            import asyncio
+            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp.close()
+            outfile = tmp.name
+
+            async def _save():
+                comm = self._edge.Communicate(text, voice=self.voice)
+                await comm.save(outfile)
+
+            asyncio.run(_save())
+            print(f"[SPEAK] edge-tts generated MP3: {outfile}", flush=True)
+            self._play_mp3_nonblocking(outfile)
+            return True
+        except Exception as e:
+            print(f"[SPEAK] edge-tts error: {e}", flush=True)
+        return False
+
+    def _speak_openrouter(self, text: str) -> bool:
+        """Attempt to speak using OpenRouter GPT Audio. Returns True if successful."""
+        if not config.OPENROUTER_API_KEY:
+            return False
+        
+        try:
+            print(f"[SPEAK] Calling OpenRouter GPT Audio API...", flush=True)
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://jarvis.local",
+                "X-OpenRouter-Title": "Jarvis Voice Assistant"
+            }
+            payload = {
+                "model": "openai/gpt-audio",
+                "modalities": ["text", "audio"],
+                "audio": {"voice": "alloy", "format": "wav"},
+                "stream": True,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": text
+                    }
+                ]
+            }
+            resp = requests.post(url, json=payload, headers=headers, timeout=30, stream=True)
+            print(f"[SPEAK] OpenRouter response status: {resp.status_code}", flush=True)
+            
+            if resp.status_code == 200:
+                # Handle streaming response
+                audio_data = None
+                for line in resp.iter_lines():
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith('data: '):
+                            data = line[6:]  # Remove 'data: ' prefix
+                            if data == '[DONE]':
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                if "choices" in chunk and len(chunk["choices"]) > 0:
+                                    choice = chunk["choices"][0]
+                                    if "delta" in choice and "audio" in choice["delta"]:
+                                        # Accumulate audio data
+                                        if audio_data is None:
+                                            audio_data = ""
+                                        audio_data += choice["delta"]["audio"]["data"]
+                            except json.JSONDecodeError:
+                                continue
+                
+                if audio_data:
+                    # Decode base64 audio data
+                    import base64
+                    wav_bytes = base64.b64decode(audio_data)
+                    
+                    # Try to play the WAV data using the same playback logic as ElevenLabs
+                    try:
+                        import wave as _wave
+                        with _wave.open(io.BytesIO(wav_bytes), 'rb') as _wr:
+                            _nch = _wr.getnchannels()
+                            _sampw = _wr.getsampwidth()
+                            _fr = _wr.getframerate()
+                            _nframes = _wr.getnframes()
+                            _comptype = _wr.getcomptype()
+                        print(f"[TTS DEBUG] OpenRouter WAV params: nch={_nch}, sampwidth={_sampw}, framerate={_fr}, nframes={_nframes}, comptype={_comptype}")
+                    except Exception as _e:
+                        print('[TTS DEBUG] Failed to read OpenRouter WAV params:', _e)
 
                         # Try simpleaudio first
                         try:
@@ -266,16 +450,15 @@ class Speaker:
                                 play_obj = wave_obj.play()
                                 play_obj.wait_done()
                                 print('[TTS DEBUG] simpleaudio playback done')
-                                return
+                                return True
                         except Exception as _e:
                             print('[TTS DEBUG] simpleaudio unavailable/failed:', _e)
 
-                        # Try pygame (prefer loading from temp file to avoid buffer format issues)
+                        # Try pygame
                         try:
                             import pygame
                             import tempfile
                             print('[TTS DEBUG] Trying pygame playback')
-                            # write WAV to temp file and load via filename to ensure correct interpretation
                             tf = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
                             tf.write(wav_bytes)
                             tf.flush()
@@ -296,173 +479,93 @@ class Speaker:
                             while ch.get_busy():
                                 pygame.time.wait(50)
                             print('[TTS DEBUG] pygame playback done; temp file:', tf.name)
-                            return
+                            return True
                         except Exception as _e:
                             print('[TTS DEBUG] pygame unavailable/failed:', _e)
 
-                        # Try winsound (Windows) as final in-memory option
+                        # Try winsound (Windows)
                         try:
                             import winsound
                             print('[TTS DEBUG] Trying winsound playback')
                             if wav_bytes[:4] == b'RIFF':
                                 winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
                                 print('[TTS DEBUG] winsound playback done')
-                                return
+                                return True
                         except Exception as _e:
                             print('[TTS DEBUG] winsound unavailable/failed:', _e)
 
-                    # If we reach here, play fallback: save file and open
-                    try:
-                        tmp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
-                        with open(tmp.name, 'wb') as f:
-                            f.write(content)
-                        self._play_mp3_nonblocking(tmp.name)
-                        return
-                    except Exception as e:
-                        print('Fallback save/play failed:', e)
-                else:
-                    print(f"[SPEAK] ElevenLabs TTS failed: {resp.status_code} {resp.text}", flush=True)
-                    # If ElevenLabs fails, attempt to switch to offline pyttsx3 immediately
-                    if self._enable_offline_pyttsx3():
+                        # Fallback: save file and play
                         try:
-                            print(f"[SPEAK] Speaking using pyttsx3 after ElevenLabs failure", flush=True)
-                            if getattr(self, '_play_q', None):
-                                ev = threading.Event()
-                                try:
-                                    self._play_q.put((text, ev))
-                                    ev.wait(timeout=8)
-                                except Exception as e:
-                                    print(f"[SPEAK] Failed to queue pyttsx3 fallback: {e}", flush=True)
-                                    # fallback to direct call
-                                    try:
-                                        self._engine.say(text)
-                                        self._engine.runAndWait()
-                                    except Exception as e2:
-                                        print(f"[SPEAK] Direct pyttsx3 fallback also failed: {e2}", flush=True)
-                            else:
-                                try:
-                                    self._engine.say(text)
-                                    self._engine.runAndWait()
-                                except Exception as e:
-                                    print(f"[SPEAK] pyttsx3 fallback failed: {e}", flush=True)
-                            print(f"[SPEAK] pyttsx3 speech completed (fallback)", flush=True)
-                            return
+                            tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                            with open(tmp.name, 'wb') as f:
+                                f.write(wav_bytes)
+                            self._play_mp3_nonblocking(tmp.name)
+                            return True
                         except Exception as e:
-                            print(f"[SPEAK] pyttsx3 fallback failed: {e}", flush=True)
-            except Exception as e:
-                print(f"[SPEAK] ElevenLabs error: {e}", flush=True)
-                # On exception (network, auth, etc.) switch to offline pyttsx3
-                if self._enable_offline_pyttsx3():
-                    try:
-                        print(f"[SPEAK] Speaking using pyttsx3 after ElevenLabs exception", flush=True)
-                        if getattr(self, '_play_q', None):
-                            ev = threading.Event()
-                            try:
-                                self._play_q.put((text, ev))
-                                ev.wait(timeout=8)
-                            except Exception as e:
-                                print(f"[SPEAK] Failed to queue pyttsx3 fallback after exception: {e}", flush=True)
-                                try:
-                                    self._engine.say(text)
-                                    self._engine.runAndWait()
-                                except Exception as e2:
-                                    print(f"[SPEAK] Direct pyttsx3 fallback also failed: {e2}", flush=True)
-                        else:
-                            try:
-                                self._engine.say(text)
-                                self._engine.runAndWait()
-                            except Exception as e:
-                                print(f"[SPEAK] pyttsx3 fallback failed after exception: {e}", flush=True)
-                        print(f"[SPEAK] pyttsx3 speech completed (fallback)", flush=True)
-                        return
-                    except Exception as e2:
-                        print(f"[SPEAK] pyttsx3 fallback failed after ElevenLabs exception: {e2}", flush=True)
-        # Edge-TTS path
-        if getattr(self, "_edge", None):
-            try:
-                print(f"[SPEAK] Using edge-tts backend", flush=True)
-                import asyncio
-                tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                tmp.close()
-                outfile = tmp.name
-
-                async def _save():
-                    comm = self._edge.Communicate(text, voice=self.voice)
-                    await comm.save(outfile)
-
-                asyncio.run(_save())
-                print(f"[SPEAK] edge-tts generated MP3: {outfile}", flush=True)
-                self._play_mp3_nonblocking(outfile)
-                return
-            except Exception as e:
-                print(f"[SPEAK] edge-tts error, falling back: {e}", flush=True)
-
-        # pyttsx3 fallback
-        if self._engine:
-            try:
-                print(f"[SPEAK] Using pyttsx3 backend", flush=True)
-                # Always queue pyttsx3 work to the dedicated worker thread to avoid thread-safety issues
-                if getattr(self, '_play_q', None):
-                    ev = threading.Event()
-                    try:
-                        self._play_q.put((text, ev))
-                        print(f"[SPEAK] pyttsx3 queued (waiting for completion)", flush=True)
-                        ev.wait(timeout=8)
-                        print(f"[SPEAK] pyttsx3 speech completed (queued)", flush=True)
-                        return
-                    except Exception as e:
-                        print(f"[SPEAK] Failed to queue pyttsx3 speak: {e}", flush=True)
-                        # fallback to direct invocation
-                        try:
-                            self._engine.say(text)
-                            print(f"[SPEAK] pyttsx3 speaking (direct fallback)...", flush=True)
-                            self._engine.runAndWait()
-                            print(f"[SPEAK] pyttsx3 speech completed (direct)", flush=True)
-                            return
-                        except Exception as e2:
-                            print(f"[SPEAK] pyttsx3 direct fallback failed: {e2}", flush=True)
+                            print('OpenRouter fallback save/play failed:', e)
+                    else:
+                        print(f"[SPEAK] OpenRouter response missing audio data: {response_data}")
                 else:
-                    # No queue available; do direct call
-                    self._engine.say(text)
-                    print(f"[SPEAK] pyttsx3 speaking...", flush=True)
-                    self._engine.runAndWait()
-                    print(f"[SPEAK] pyttsx3 speech completed", flush=True)
-                    return
-            except Exception as e:
-                print(f"[SPEAK] pyttsx3 error: {e}", flush=True)
-
-        # Final fallback: print only
-        print(text, flush=True)
-        # As a last effort, attempt to initialize pyttsx3 and speak locally
-        try:
-            if not self._engine:
-                print("[SPEAK] No audio backend succeeded; attempting pyttsx3 as last-resort.", flush=True)
-                if self._enable_offline_pyttsx3():
-                    try:
-                            # If config forces file playback, use that method
-                            if getattr(__import__('..', fromlist=['config']), 'config').FORCE_PYTTX3_FILE:
-                                played = self._pytt_save_and_play(text)
-                                if played:
-                                    print("[SPEAK] pyttsx3 file-playback completed (last-resort)", flush=True)
-                                    return
-                            self._engine.say(text)
-                            self._engine.runAndWait()
-                            print("[SPEAK] pyttsx3 speech completed (last-resort)", flush=True)
-                            return
-                    except Exception as e:
-                        print(f"[SPEAK] pyttsx3 last-resort failed: {e}", flush=True)
+                    print(f"[SPEAK] OpenRouter response missing choices: {response_data}")
             else:
-                # engine exists but previous paths didn't run it; try speaking
-                try:
-                    print("[SPEAK] Using existing pyttsx3 engine as last-resort.", flush=True)
-                    self._engine.say(text)
-                    self._engine.runAndWait()
-                    print("[SPEAK] pyttsx3 speech completed (existing engine)", flush=True)
-                    return
-                except Exception as e:
-                    print(f"[SPEAK] pyttsx3 existing-engine failed: {e}", flush=True)
+                print(f"[SPEAK] OpenRouter TTS failed: {resp.status_code} {resp.text}", flush=True)
         except Exception as e:
-            print(f"[SPEAK] Final fallback pyttsx3 attempt failed: {e}", flush=True)
+            print(f"[SPEAK] OpenRouter error: {e}", flush=True)
+        return False
+
+    def _speak_gtts(self, text: str) -> bool:
+        """Attempt to speak using free Google Translate TTS via gTTS."""
+        try:
+            from gtts import gTTS
+        except Exception as e:
+            print(f"[SPEAK] gTTS unavailable: {e}", flush=True)
+            return False
+
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+            tmp.close()
+            tts = gTTS(text=text, lang="en")
+            tts.save(tmp.name)
+            self._play_mp3_nonblocking(tmp.name)
+            return True
+        except Exception as e:
+            print(f"[SPEAK] gTTS error: {e}", flush=True)
+        return False
+
+    def _speak_pyttsx3(self, text: str) -> bool:
+        """Attempt to speak using pyttsx3. Returns True if successful."""
+        if self._engine is None:
+            return False
+        
+        try:
+            print(f"[SPEAK] Using pyttsx3 backend", flush=True)
+            if getattr(self, '_play_q', None):
+                ev = threading.Event()
+                try:
+                    self._play_q.put((text, ev))
+                    print(f"[SPEAK] pyttsx3 queued (waiting for completion)", flush=True)
+                    ev.wait(timeout=8)
+                    print(f"[SPEAK] pyttsx3 speech completed (queued)", flush=True)
+                    return True
+                except Exception as e:
+                    print(f"[SPEAK] Failed to queue pyttsx3 speak: {e}", flush=True)
+                    try:
+                        self._engine.say(text)
+                        print(f"[SPEAK] pyttsx3 speaking (direct fallback)...", flush=True)
+                        self._engine.runAndWait()
+                        print(f"[SPEAK] pyttsx3 speech completed (direct)", flush=True)
+                        return True
+                    except Exception as e2:
+                        print(f"[SPEAK] pyttsx3 direct fallback failed: {e2}", flush=True)
+            else:
+                self._engine.say(text)
+                print(f"[SPEAK] pyttsx3 speaking...", flush=True)
+                self._engine.runAndWait()
+                print(f"[SPEAK] pyttsx3 speech completed", flush=True)
+                return True
+        except Exception as e:
+            print(f"[SPEAK] pyttsx3 error: {e}", flush=True)
+        return False
 
     def _pytt_save_and_play(self, text: str):
         """Save TTS output to a WAV file using a fresh pyttsx3 engine and play it with OS player/winsound."""
